@@ -498,8 +498,7 @@ def main():
         }
         input_data = st.sidebar.file_uploader(
             f"Upload {input_type} file",
-            type=file_types[input_type],
-            key='uploaded_file'
+            type=file_types[input_type]
         )
     
     # Process input
@@ -518,10 +517,6 @@ def main():
                         # Show sample of processed text
                         with st.expander("View processed text sample"):
                             st.write(processed_text[:500] + "...")
-                            
-                        # Clear the file uploader
-                        st.session_state['uploaded_file'] = None
-                        st.rerun()
                     else:
                         st.error("Failed to create vector store")
                 else:
