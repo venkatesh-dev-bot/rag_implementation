@@ -27,6 +27,9 @@ import queue
 from threading import Thread
 import shutil
 import streamlit.components.v1 as components
+from langchain.retrievers.document_compressors import EmbeddingsFilter
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers import ParentDocumentRetriever
 
 
 # Load environment variables
@@ -124,14 +127,56 @@ def get_answer(document_search, query):
             seed=42
         )
         
-        # Get relevant documents with more context
-        docs = document_search.similarity_search(
-            query,
-            k=4,  # Increased from default to get more context
-            search_kwargs={"k": 4, "random_state": 42}  # Add seed to similarity search
+        # Create base retriever from FAISS
+        base_retriever = document_search.as_retriever(
+            search_kwargs={"k": 8}  # Increased initial retrieval for better reranking
         )
         
-        # Create prompt template with more explicit instructions
+        # Setup embeddings filter
+        embeddings = OpenAIEmbeddings()
+        embeddings_filter = EmbeddingsFilter(
+            embeddings=embeddings, 
+            similarity_threshold=0.76  # Adjust this threshold as needed
+        )
+        
+        # Create compression retriever with embeddings filter
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=embeddings_filter,
+            base_retriever=base_retriever
+        )
+        
+        # Get filtered documents
+        docs = compression_retriever.get_relevant_documents(query)
+        
+        # Print and save relevant chunks
+        # st.write("### Relevant Text Chunks:")
+        chunks_text = f"Query: {query}\n\nRelevant Chunks:\n\n"
+        
+        for i, doc in enumerate(docs, 1):
+            # st.write(f"\nChunk {i}:")
+            # st.write(doc.page_content)
+            # st.write(f"Source: {doc.metadata.get('source', 'Unknown')}")
+            # st.write("-" * 50)
+            
+            # Add to chunks text for saving
+            chunks_text += f"Chunk {i}:\n"
+            chunks_text += f"Content: {doc.page_content}\n"
+            chunks_text += f"Source: {doc.metadata.get('source', 'Unknown')}\n"
+            chunks_text += "-" * 50 + "\n\n"
+        
+        # Save chunks to file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        chunks_filename = f"chunks_{timestamp}.txt"
+        
+        try:
+            with open(chunks_filename, 'w', encoding='utf-8') as f:
+                f.write(chunks_text)
+            # st.success(f"Chunks saved to {chunks_filename}")
+        except Exception as e:
+            raise e
+            # st.error(f"Error saving chunks to file: {str(e)}")
+
+        # Continue with existing prompt template and answer generation
         prompt_template = """
         variables for this chain are: "Context", "Question"
  
@@ -397,15 +442,12 @@ def delete_vectorstore(doc_id, base_directory="vectorstore"):
             st.session_state[f'confirm_delete_{doc_id}'] = False
             
         if not st.session_state[f'confirm_delete_{doc_id}']:
-            # Show confirmation dialog
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button(f"Yes, delete {doc_id}", key=f"yes_delete_{doc_id}"):
-                    st.session_state[f'confirm_delete_{doc_id}'] = True
-                    st.rerun()
-            with col2:
-                if st.button("Cancel", key=f"cancel_delete_{doc_id}"):
-                    return False
+            # Show confirmation buttons side by side without columns
+            if st.sidebar.button(f"Yes, delete {doc_id}", key=f"yes_delete_{doc_id}"):
+                st.session_state[f'confirm_delete_{doc_id}'] = True
+                st.rerun()
+            if st.sidebar.button("Cancel", key=f"cancel_delete_{doc_id}"):
+                return False
             return False
         
         # If confirmed, proceed with deletion
@@ -443,7 +485,7 @@ def main():
     st.sidebar.title("Document Upload")
     
     # Input selection
-    input_type = st.sidebar.selectbox("Select Input Type", ["Text", "PDF", "DOCX", "TXT"])
+    input_type = st.sidebar.selectbox("Select Input Type", ["PDF", "Text", "DOCX", "TXT"])
     
     # File upload or text input
     if input_type == "Text":
@@ -456,7 +498,8 @@ def main():
         }
         input_data = st.sidebar.file_uploader(
             f"Upload {input_type} file",
-            type=file_types[input_type]
+            type=file_types[input_type],
+            key='uploaded_file'
         )
     
     # Process input
@@ -475,6 +518,10 @@ def main():
                         # Show sample of processed text
                         with st.expander("View processed text sample"):
                             st.write(processed_text[:500] + "...")
+                            
+                        # Clear the file uploader
+                        st.session_state['uploaded_file'] = None
+                        st.rerun()
                     else:
                         st.error("Failed to create vector store")
                 else:
@@ -486,23 +533,21 @@ def main():
     if documents:
         for doc in documents:
             with st.sidebar.expander(f"📄 {doc['id']}"):
-                st.write(f"Added: {doc['date_added']}")
-                st.write(f"Vectors: {doc['vectors']:,}")
-                st.write(f"Size: {doc['size_mb']:.2f} MB")
+                # st.write(f"Added: {doc['date_added']}")
+                # st.write(f"Vectors: {doc['vectors']:,}")
+                # st.write(f"Size: {doc['size_mb']:.2f} MB")
                 
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button("Load", key=f"load_{doc['id']}"):
-                        loaded_vectorstore = load_vectorstore(doc_id=doc['id'])
-                        if loaded_vectorstore:
-                            st.session_state["document_search"] = loaded_vectorstore
-                            st.session_state["current_doc_id"] = doc['id']
-                            st.success(f"Loaded document: {doc['id']}")
-                            st.rerun()
-                with col2:
-                    if st.button("Delete", key=f"delete_{doc['id']}"):
-                        if delete_vectorstore(doc['id']):
-                            st.rerun()
+                if st.button("Load", key=f"load_{doc['id']}"):
+                    loaded_vectorstore = load_vectorstore(doc_id=doc['id'])
+                    if loaded_vectorstore:
+                        st.session_state["document_search"] = loaded_vectorstore
+                        st.session_state["current_doc_id"] = doc['id']
+                        st.success(f"Loaded document: {doc['id']}")
+                        st.rerun()
+                        
+                if st.button("Delete", key=f"delete_{doc['id']}"):
+                    if delete_vectorstore(doc['id']):
+                        st.rerun()
     else:
         st.sidebar.info("No saved documents found")
     
@@ -541,6 +586,14 @@ def main():
         
         if st.button("Get Answer"):
             if query:
+                # Create a placeholder for the sidebar
+                sidebar_placeholder = st.sidebar.empty()
+                
+                # Hide/disable the sidebar by replacing it with empty content
+                with sidebar_placeholder:
+                    st.empty()
+                
+                # Show spinner and generate answer
                 with st.spinner("Generating answer..."):
                     answer = get_answer(st.session_state["document_search"], query)
                     if answer:
@@ -618,6 +671,26 @@ def main():
                         </style>
                         """
 
+                        responsive_wrapper = """
+                        <script>
+                        function updateIframeHeight() {
+                            // Get viewport height
+                            const vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+                            // Calculate desired height (70% of viewport height, minimum 400px)
+                            const desiredHeight = Math.max(vh * 0.7, 400);
+                            // Get the iframe element
+                            const iframe = document.querySelector('iframe');
+                            if (iframe) {
+                                iframe.style.height = desiredHeight + 'px';
+                            }
+                        }
+
+                        // Update height on load and resize
+                        window.addEventListener('load', updateIframeHeight);
+                        window.addEventListener('resize', updateIframeHeight);
+                        </script>
+                        """
+
                         # Process the answer to properly handle LaTeX
                         processed_answer = answer['output_text'] if isinstance(answer, dict) else str(answer)
                         
@@ -625,16 +698,19 @@ def main():
                         formatted_answer = f'<div class="answer-container tex2jax_process">{processed_answer}</div>'
                         
                         # Combine everything
-                        html_content = f"{mathjax_script}{css_style}{formatted_answer}"
+                        html_content = f"{mathjax_script}{css_style}{formatted_answer}{responsive_wrapper}"
                         
                         # Render HTML with increased height and scrolling
                         components.html(
-                            html_content, 
-                            height=800, 
+                            html_content,
+                            height=600, 
                             scrolling=True
                         )
                     else:
                         st.error("No answer was generated")
+                
+                # Restore the sidebar after answer generation
+                sidebar_placeholder.empty()
             else:
                 st.warning("Please enter a question")
                 
