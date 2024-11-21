@@ -30,6 +30,8 @@ import streamlit.components.v1 as components
 from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers import ParentDocumentRetriever
+from dataclasses import dataclass
+from typing import List, Optional, Dict
 
 
 # Load environment variables
@@ -116,68 +118,26 @@ def process_text(text, doc_id):
         st.error(f"Error processing text: {str(e)}")
         return None, None
 
-def get_answer(document_search, query):
-    try:
-        # Create ChatOpenAI instance
-        llm = ChatOpenAI(
-            model_name="gpt-4o-mini", 
-            temperature=0,  # Set to 0 for consistent outputs
-            streaming=True, 
-            verbose=True,
-            seed=42
-        )
-        
-        # Create base retriever from FAISS
-        base_retriever = document_search.as_retriever(
-            search_kwargs={"k": 8}  # Increased initial retrieval for better reranking
-        )
-        
-        # Setup embeddings filter
-        embeddings = OpenAIEmbeddings()
-        embeddings_filter = EmbeddingsFilter(
-            embeddings=embeddings, 
-            similarity_threshold=0.76  # Adjust this threshold as needed
-        )
-        
-        # Create compression retriever with embeddings filter
-        compression_retriever = ContextualCompressionRetriever(
-            base_compressor=embeddings_filter,
-            base_retriever=base_retriever
-        )
-        
-        # Get filtered documents
-        docs = compression_retriever.get_relevant_documents(query)
-        
-        # Print and save relevant chunks
-        # st.write("### Relevant Text Chunks:")
-        chunks_text = f"Query: {query}\n\nRelevant Chunks:\n\n"
-        
-        for i, doc in enumerate(docs, 1):
-            # st.write(f"\nChunk {i}:")
-            # st.write(doc.page_content)
-            # st.write(f"Source: {doc.metadata.get('source', 'Unknown')}")
-            # st.write("-" * 50)
-            
-            # Add to chunks text for saving
-            chunks_text += f"Chunk {i}:\n"
-            chunks_text += f"Content: {doc.page_content}\n"
-            chunks_text += f"Source: {doc.metadata.get('source', 'Unknown')}\n"
-            chunks_text += "-" * 50 + "\n\n"
-        
-        # Save chunks to file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        chunks_filename = f"chunks_{timestamp}.txt"
-        
-        try:
-            with open(chunks_filename, 'w', encoding='utf-8') as f:
-                f.write(chunks_text)
-            # st.success(f"Chunks saved to {chunks_filename}")
-        except Exception as e:
-            raise e
-            # st.error(f"Error saving chunks to file: {str(e)}")
+@dataclass
+class ChatMessage:
+    role: str
+    content: str
 
-        # Continue with existing prompt template and answer generation
-        prompt_template = """
+# Add after existing global variables
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "temp_rag_prompt" not in st.session_state:
+    st.session_state.temp_rag_prompt = None
+if "temp_fallback_prompt" not in st.session_state:
+    st.session_state.temp_fallback_prompt = None
+if "is_editing_prompts" not in st.session_state:
+    st.session_state.is_editing_prompts = False
+
+def get_custom_prompt() -> Optional[str]:
+    """Get custom prompt from session state or return default if none set"""
+    if "custom_prompt" not in st.session_state:
+        st.session_state.custom_prompt = """
         variables for this chain are: "Context", "Question"
  
         System: Act as a precise and consistent teaching assistant. You must:
@@ -202,59 +162,128 @@ def get_answer(document_search, query):
             4. Ensure proper spacing between elements
             5. Do not use markdown formatting
         
-        # Below are the different steps to consider before generating a response:
-        
-        1. User Question/Query
-        
-            Case 1 - If the question is present in the "Context":
-                Step 1 - Answer the question in 300 words.
-                Step 2 - Provide real-world examples related to the question if required based on question.
-                Step 3 - Check if the teacher have any other questions or queries.
-        
-            Case 2 - If the question is not related to the "Context":
-                Step 1 - Respond saying "the question doesn't seem related to the chapter".
-        
-            Case 3 - If the question is related to generating FAQs:
-                Step 1 - Respond saying "Refer FAQ section for generating FAQs for a topic"
-        
-            Case 4 - If the question is out of educational standards:
-                Step 1 - Respond saying "The question doesn't seem related to the assistance I provide".
-        
-            Case 5 - If the "Context" provided is not related to the question or not enough to answer the question:
-                Step 1 - Explore out of "Context" to answer the question only if the question is related to the topic of the context.
-        
-        2. If the question is unclear but the context is not empty, ask the user further information required to answer the question.
-        
-        3. Add flowcharts to the answer if required for the question.
-        
-        4. Add real-life examples to the answer based on the question to help understand the concept behind it.
-        
-        5. If the answer has a formula, explain the formula in detail.
-        
-        6. Make sure in generating answers for ideas/explanation for science experiments/projects, include precautions, requirements, and procedures for the project/experiment. Emphasize the importance of safety and explicitly instruct that the experiments should not pose any harm to students. Ensure the generated content aligns with ethical and safe educational practices.
-        
-        
         Context: ```{context}```
         Question: {question}
         Answer:
         """
-        
-        # Create prompt
-        prompt = PromptTemplate(
-            template=prompt_template,
-            input_variables=["context", "question"]
+    return st.session_state.custom_prompt
+
+def get_answer(document_search, query):
+    try:
+        llm = ChatOpenAI(
+            model_name="gpt-4o-mini", 
+            temperature=0,  # Set to 0 for consistent outputs
+            streaming=True, 
+            verbose=True,
+            seed=42
         )
         
-        # Create chain using new method
-        document_chain = create_stuff_documents_chain(llm, prompt)
+        # Create base retriever from FAISS
+        base_retriever = document_search.as_retriever(
+            search_kwargs={"k": 8}  # Increased initial retrieval for better reranking
+        )
         
-        # Get answer using new invoke method
-        response = document_chain.invoke({
-            "context": docs,
-            "question": query
-        })
+        # Setup embeddings filter
+        embeddings = OpenAIEmbeddings()
+        embeddings_filter = EmbeddingsFilter(
+            embeddings=embeddings, 
+            similarity_threshold=0.4
+        )
         
-        return response
+        # Create compression retriever with embeddings filter
+        compression_retriever = ContextualCompressionRetriever(
+            base_compressor=embeddings_filter,
+            base_retriever=base_retriever
+        )
+        
+        # Get filtered documents
+        docs = compression_retriever.get_relevant_documents(query)
+        
+        # # Display retrieved chunks in an expander
+        # with st.expander("📑 Retrieved Chunks", expanded=False):
+        #     st.markdown("### Retrieved Context Chunks")
+        #     for i, doc in enumerate(docs, 1):
+        #         with st.container():
+        #             st.markdown(f"**Chunk {i}**")
+        #             st.markdown("**Content:**")
+        #             st.text(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
+        #             st.markdown("**Metadata:**")
+        #             st.json(doc.metadata)
+        #             st.markdown("---")
+            
+        #     if not docs:
+        #         st.info("No relevant chunks found. Using general knowledge.")
+        
+        # Rest of the function remains the same...
+        has_relevant_docs = len(docs) > 0 and any(doc.page_content.strip() for doc in docs)
+        
+        if has_relevant_docs:
+            rag_prompt = PromptTemplate(
+                template="""Use the following pieces of context to answer the question. If the context doesn't contain a direct answer, use your knowledge to provide a relevant response while staying on topic.
+
+                Context: ```{context}```
+                Question: {question}
+
+                Instructions:
+                1. If the answer is in the context, use that information primarily
+                2. If the context is partially relevant, combine it with your knowledge
+                3. If the context isn't directly relevant, provide a helpful response based on the general topic
+                4. Always maintain a helpful and informative tone
+                5. Format your response in HTML with appropriate tags
+                
+                Answer:""",
+                input_variables=["context", "question"]
+            )
+            
+            document_chain = create_stuff_documents_chain(llm, rag_prompt)
+            response = document_chain.invoke({
+                "context": docs,
+                "question": query
+            })
+        else:
+            fallback_prompt = PromptTemplate(
+                template="""You are a helpful AI assistant. Please provide a relevant and informative response to the following question:
+
+                Question: {question}
+
+                Instructions:
+                1. Provide a comprehensive answer based on your knowledge
+                2. Use examples where appropriate
+                3. Format your response in HTML with appropriate tags
+                4. Be helpful and informative
+                
+                Answer:""",
+                input_variables=["question"]
+            )
+            
+            response = llm.invoke(fallback_prompt.format(question=query))
+            response = {"output_text": response.content}
+
+        # Process the response
+        if isinstance(response, dict):
+            answer_text = response["output_text"]
+        else:
+            answer_text = str(response)
+
+        # Store raw answer for formatted display
+        formatted_answer = answer_text
+
+        # Store in chat history with markdown formatting
+        st.session_state.chat_history.append(ChatMessage(role="user", content=query))
+        st.session_state.chat_history.append(ChatMessage(
+            role="assistant", 
+            content=f"""
+<div class="chat-answer">
+{formatted_answer}
+</div>
+"""
+        ))
+        
+        return {
+            "output_text": formatted_answer,
+            "chat_text": formatted_answer
+        }
+        
     except Exception as e:
         st.error(f"Error generating answer: {str(e)}")
         return None
@@ -470,6 +499,158 @@ def delete_vectorstore(doc_id, base_directory="vectorstore"):
         st.error(f"Error deleting document: {str(e)}")
         return False
 
+def get_prompts_directory() -> str:
+    """Create and return the prompts directory path"""
+    prompts_dir = "stored_prompts"
+    if not os.path.exists(prompts_dir):
+        os.makedirs(prompts_dir)
+    return prompts_dir
+
+def save_prompt_to_file(prompt_name: str, prompt_content: str, prompt_type: str) -> bool:
+    """Save a prompt to a JSON file"""
+    try:
+        prompts_dir = get_prompts_directory()
+        prompts_file = os.path.join(prompts_dir, "custom_prompts.json")
+        
+        # Load existing prompts
+        prompts = load_stored_prompts()
+        
+        # Add new prompt
+        prompts[prompt_name] = {
+            "content": prompt_content,
+            "type": prompt_type,
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Save to file
+        with open(prompts_file, 'w', encoding='utf-8') as f:
+            json.dump(prompts, f, indent=2)
+            
+        return True
+    except Exception as e:
+        st.error(f"Error saving prompt: {str(e)}")
+        return False
+
+def load_stored_prompts() -> Dict:
+    """Load all stored prompts from file"""
+    try:
+        prompts_file = os.path.join(get_prompts_directory(), "custom_prompts.json")
+        if os.path.exists(prompts_file):
+            with open(prompts_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        st.error(f"Error loading prompts: {str(e)}")
+        return {}
+
+def delete_stored_prompt(prompt_name: str) -> bool:
+    """Delete a stored prompt"""
+    try:
+        prompts = load_stored_prompts()
+        if prompt_name in prompts:
+            del prompts[prompt_name]
+            prompts_file = os.path.join(get_prompts_directory(), "custom_prompts.json")
+            with open(prompts_file, 'w', encoding='utf-8') as f:
+                json.dump(prompts, f, indent=2)
+            return True
+        return False
+    except Exception as e:
+        st.error(f"Error deleting prompt: {str(e)}")
+        return False
+
+def render_prompt_settings():
+    st.sidebar.header("Prompt Settings")
+    
+    # Load stored prompts
+    stored_prompts = load_stored_prompts()
+    
+    # Toggle for editing mode
+    st.session_state.is_editing_prompts = st.sidebar.checkbox(
+        "Edit Prompts",
+        value=st.session_state.is_editing_prompts,
+        key="edit_prompts_toggle"
+    )
+
+    if st.session_state.is_editing_prompts:
+        # Initialize temp prompts if needed
+        if st.session_state.temp_rag_prompt is None:
+            st.session_state.temp_rag_prompt = get_custom_prompt()
+        if st.session_state.temp_fallback_prompt is None:
+            st.session_state.temp_fallback_prompt = st.session_state.get("custom_fallback_prompt", "")
+
+        with st.sidebar.expander("RAG Prompt Template", expanded=True):
+            # Prompt name input
+            rag_prompt_name = st.text_input(
+                "Prompt Name",
+                value="",
+                key="rag_prompt_name",
+                help="Enter a name to save this prompt"
+            )
+            
+            # Edit in temporary state
+            st.session_state.temp_rag_prompt = st.text_area(
+                "Edit RAG Prompt",
+                value=st.session_state.temp_rag_prompt,
+                height=300,
+                help="Use {context} and {question} as placeholders",
+                key="rag_prompt_editor"
+            )
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("Save RAG", key="save_rag"):
+                    st.session_state.custom_prompt = st.session_state.temp_rag_prompt
+                    if rag_prompt_name:
+                        if save_prompt_to_file(rag_prompt_name, st.session_state.temp_rag_prompt, "rag"):
+                            st.success(f"✅ Saved as '{rag_prompt_name}'!")
+                    else:
+                        st.warning("Please enter a name to save the prompt")
+                    
+            with col2:
+                if st.button("Reset RAG", key="reset_rag"):
+                    st.session_state.temp_rag_prompt = get_custom_prompt()
+                    st.session_state.custom_prompt = get_custom_prompt()
+                    st.success("🔄 Reset!")
+                    
+            with col3:
+                if st.button("Load Saved", key="load_rag"):
+                    st.session_state.show_rag_prompts = True
+
+        # Similar structure for fallback prompt...
+        
+        # Show stored prompts in a separate expander
+        with st.sidebar.expander("Stored Prompts", expanded=False):
+            st.subheader("Saved RAG Prompts")
+            rag_prompts = {k: v for k, v in stored_prompts.items() if v["type"] == "rag"}
+            
+            for name, prompt_data in rag_prompts.items():
+                with st.container():
+                    st.write(f"**{name}**")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("Load", key=f"load_{name}"):
+                            st.session_state.temp_rag_prompt = prompt_data["content"]
+                            st.session_state.custom_prompt = prompt_data["content"]
+                            st.success(f"Loaded prompt: {name}")
+                    with col2:
+                        if st.button("Delete", key=f"delete_{name}"):
+                            if delete_stored_prompt(name):
+                                st.success(f"Deleted prompt: {name}")
+                                st.rerun()
+                    st.markdown("---")
+
+            st.subheader("Saved Fallback Prompts")
+            fallback_prompts = {k: v for k, v in stored_prompts.items() if v["type"] == "fallback"}
+            # Similar structure for fallback prompts...
+
+    # Show current active prompts when not editing
+    else:
+        with st.sidebar.expander("View Active Prompts"):
+            st.markdown("**Current RAG Prompt:**")
+            st.code(get_custom_prompt(), language="text")
+            st.markdown("**Current Fallback Prompt:**")
+            st.code(st.session_state.get("custom_fallback_prompt", "Default fallback prompt"), language="text")
+
 def main():
     st.set_page_config(page_title="Document Q&A App", page_icon="📚", layout="wide")
     st.title("Document Q&A Application")
@@ -574,13 +755,58 @@ def main():
                     st.warning(f"Large vector store detected: {size['gigabytes']:.2f} GB")
                     st.info("Consider optimizing by adjusting chunk size or reducing overlap")
 
+    # Replace the old prompt customization section with:
+    render_prompt_settings()
+
+    # Add this CSS for chat messages
+    st.markdown("""
+    <style>
+    .chat-answer {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+        margin: 5px 0;
+    }
+    .chat-answer p {
+        margin-bottom: 10px;
+    }
+    .chat-answer ul, .chat-answer ol {
+        margin-left: 20px;
+        margin-bottom: 10px;
+    }
+    .chat-answer li {
+        margin-bottom: 5px;
+    }
+    .chat-answer strong {
+        color: #2c3e50;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     # Question answering
     if "document_search" in st.session_state:
         st.header("Ask Questions")
-        query = st.text_input("Enter your question about the document")
         
-        if st.button("Get Answer"):
-            if query:
+        # Display chat history with MathJax support
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg.role):
+                # Add MathJax support for chat messages
+                if msg.role == "assistant":
+                    st.markdown(f"""
+                    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+                    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+                    {msg.content}
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(msg.content)
+        
+        # Query input using chat input
+        query = st.chat_input("Enter your question about the document")
+        
+        if query:
+            if st.session_state.get("document_search"):
                 # Create a placeholder for the sidebar
                 sidebar_placeholder = st.sidebar.empty()
                 
@@ -592,7 +818,7 @@ def main():
                 with st.spinner("Generating answer..."):
                     answer = get_answer(st.session_state["document_search"], query)
                     if answer:
-                        # Add MathJax script with better configuration
+                        # Add MathJax script and CSS (keep your existing styling)
                         mathjax_script = """
                         <script>
                             window.MathJax = {
