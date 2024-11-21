@@ -170,7 +170,6 @@ def get_custom_prompt() -> Optional[str]:
 
 def get_answer(document_search, query):
     try:
-        # Create ChatOpenAI instance
         llm = ChatOpenAI(
             model_name="gpt-4o-mini", 
             temperature=0,  # Set to 0 for consistent outputs
@@ -188,7 +187,7 @@ def get_answer(document_search, query):
         embeddings = OpenAIEmbeddings()
         embeddings_filter = EmbeddingsFilter(
             embeddings=embeddings, 
-            similarity_threshold=0.76  # Adjust this threshold as needed
+            similarity_threshold=0.4
         )
         
         # Create compression retriever with embeddings filter
@@ -200,138 +199,90 @@ def get_answer(document_search, query):
         # Get filtered documents
         docs = compression_retriever.get_relevant_documents(query)
         
-        # Check if we got relevant documents
+        # # Display retrieved chunks in an expander
+        # with st.expander("📑 Retrieved Chunks", expanded=False):
+        #     st.markdown("### Retrieved Context Chunks")
+        #     for i, doc in enumerate(docs, 1):
+        #         with st.container():
+        #             st.markdown(f"**Chunk {i}**")
+        #             st.markdown("**Content:**")
+        #             st.text(doc.page_content[:500] + "..." if len(doc.page_content) > 500 else doc.page_content)
+        #             st.markdown("**Metadata:**")
+        #             st.json(doc.metadata)
+        #             st.markdown("---")
+            
+        #     if not docs:
+        #         st.info("No relevant chunks found. Using general knowledge.")
+        
+        # Rest of the function remains the same...
         has_relevant_docs = len(docs) > 0 and any(doc.page_content.strip() for doc in docs)
         
         if has_relevant_docs:
-            # Print and save relevant chunks
-            # st.write("### Relevant Text Chunks:")
-            chunks_text = f"Query: {query}\n\nRelevant Chunks:\n\n"
-            
-            for i, doc in enumerate(docs, 1):
-                # st.write(f"\nChunk {i}:")
-                # st.write(doc.page_content)
-                # st.write(f"Source: {doc.metadata.get('source', 'Unknown')}")
-                # st.write("-" * 50)
-                
-                # Add to chunks text for saving
-                chunks_text += f"Chunk {i}:\n"
-                chunks_text += f"Content: {doc.page_content}\n"
-                chunks_text += f"Source: {doc.metadata.get('source', 'Unknown')}\n"
-                chunks_text += "-" * 50 + "\n\n"
-            
-            # Save chunks to file
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            chunks_filename = f"chunks_{timestamp}.txt"
-            
-            try:
-                with open(chunks_filename, 'w', encoding='utf-8') as f:
-                    f.write(chunks_text)
-                # st.success(f"Chunks saved to {chunks_filename}")
-            except Exception as e:
-                raise e
-                # st.error(f"Error saving chunks to file: {str(e)}")
+            rag_prompt = PromptTemplate(
+                template="""Use the following pieces of context to answer the question. If the context doesn't contain a direct answer, use your knowledge to provide a relevant response while staying on topic.
 
-            # Continue with existing prompt template and answer generation
-            prompt_template = """
-            variables for this chain are: "Context", "Question"
- 
-            System: Act as a precise and consistent teaching assistant. You must:
-            1. Base your answers strictly on the provided context
-            2. If the exact answer isn't in the context, say "I cannot find a direct answer to this question in the provided context."
-            3. Maintain consistency in your responses for identical questions
-            4. Provide clear citations from the context when possible
-            
-            # Don't's -
-                1. Do not halucinate on your own.
-            
-            # Answer Formatting: 
-                1. Format your response in HTML with appropriate tags:
-                - Use <p> for paragraphs
-                - Use <strong> for bold text
-                - Use <ul> and <li> for bullet points
-                - Use <br> for line breaks
-                2. For mathematical expressions:
-                - Use $...$ for inline math
-                - Use $$...$$ for display math
-                3. Use <h3> for subheadings
-                4. Ensure proper spacing between elements
-                5. Do not use markdown formatting
-            
-            # Below are the different steps to consider before generating a response:
-            
-            1. User Question/Query
-            
-                Case 1 - If the question is present in the "Context":
-                    Step 1 - Answer the question in 300 words.
-                    Step 2 - Provide real-world examples related to the question if required based on question.
-                    Step 3 - Check if the teacher have any other questions or queries.
-            
-                Case 2 - If the question is not related to the "Context":
-                    Step 1 - Respond saying "the question doesn't seem related to the chapter".
-            
-                Case 3 - If the question is related to generating FAQs:
-                    Step 1 - Respond saying "Refer FAQ section for generating FAQs for a topic"
-            
-                Case 4 - If the question is out of educational standards:
-                    Step 1 - Respond saying "The question doesn't seem related to the assistance I provide".
-            
-                Case 5 - If the "Context" provided is not related to the question or not enough to answer the question:
-                    Step 1 - Explore out of "Context" to answer the question only if the question is related to the topic of the context.
-            
-            2. If the question is unclear but the context is not empty, ask the user further information required to answer the question.
-            
-            3. Add flowcharts to the answer if required for the question.
-            
-            4. Add real-life examples to the answer based on the question to help understand the concept behind it.
-            
-            5. If the answer has a formula, explain the formula in detail.
-            
-            6. Make sure in generating answers for ideas/explanation for science experiments/projects, include precautions, requirements, and procedures for the project/experiment. Emphasize the importance of safety and explicitly instruct that the experiments should not pose any harm to students. Ensure the generated content aligns with ethical and safe educational practices.
-            
-            
-            Context: ```{context}```
-            Question: {question}
-            Answer:
-            """
-            
-            # Create prompt
-            prompt = PromptTemplate(
-                template=get_custom_prompt(),
+                Context: ```{context}```
+                Question: {question}
+
+                Instructions:
+                1. If the answer is in the context, use that information primarily
+                2. If the context is partially relevant, combine it with your knowledge
+                3. If the context isn't directly relevant, provide a helpful response based on the general topic
+                4. Always maintain a helpful and informative tone
+                5. Format your response in HTML with appropriate tags
+                
+                Answer:""",
                 input_variables=["context", "question"]
             )
             
-            # Create chain using new method
-            document_chain = create_stuff_documents_chain(llm, prompt)
-            
-            # Get answer using new invoke method
+            document_chain = create_stuff_documents_chain(llm, rag_prompt)
             response = document_chain.invoke({
                 "context": docs,
                 "question": query
             })
         else:
-            # Use custom fallback prompt
-            if "custom_fallback_prompt" not in st.session_state:
-                st.session_state.custom_fallback_prompt = """You are a helpful AI assistant. Please answer the following question to the best of your ability:
-                Question: {question}
-                
-                Note: This is a direct response as no relevant context was found in the documents.
-                
-                Answer:"""
-            
             fallback_prompt = PromptTemplate(
-                template=st.session_state.custom_fallback_prompt,
+                template="""You are a helpful AI assistant. Please provide a relevant and informative response to the following question:
+
+                Question: {question}
+
+                Instructions:
+                1. Provide a comprehensive answer based on your knowledge
+                2. Use examples where appropriate
+                3. Format your response in HTML with appropriate tags
+                4. Be helpful and informative
+                
+                Answer:""",
                 input_variables=["question"]
             )
             
             response = llm.invoke(fallback_prompt.format(question=query))
-            response = {"output_text": response.content}  # Match RAG response format
+            response = {"output_text": response.content}
 
-        # Store in chat history
+        # Process the response
+        if isinstance(response, dict):
+            answer_text = response["output_text"]
+        else:
+            answer_text = str(response)
+
+        # Store raw answer for formatted display
+        formatted_answer = answer_text
+
+        # Store in chat history with markdown formatting
         st.session_state.chat_history.append(ChatMessage(role="user", content=query))
-        st.session_state.chat_history.append(ChatMessage(role="assistant", content=response["output_text"]))
+        st.session_state.chat_history.append(ChatMessage(
+            role="assistant", 
+            content=f"""
+<div class="chat-answer">
+{formatted_answer}
+</div>
+"""
+        ))
         
-        return response
+        return {
+            "output_text": formatted_answer,
+            "chat_text": formatted_answer
+        }
         
     except Exception as e:
         st.error(f"Error generating answer: {str(e)}")
@@ -807,16 +758,51 @@ def main():
     # Replace the old prompt customization section with:
     render_prompt_settings()
 
+    # Add this CSS for chat messages
+    st.markdown("""
+    <style>
+    .chat-answer {
+        font-family: Arial, sans-serif;
+        line-height: 1.6;
+        padding: 10px;
+        background-color: #f8f9fa;
+        border-radius: 4px;
+        margin: 5px 0;
+    }
+    .chat-answer p {
+        margin-bottom: 10px;
+    }
+    .chat-answer ul, .chat-answer ol {
+        margin-left: 20px;
+        margin-bottom: 10px;
+    }
+    .chat-answer li {
+        margin-bottom: 5px;
+    }
+    .chat-answer strong {
+        color: #2c3e50;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
     # Question answering
     if "document_search" in st.session_state:
         st.header("Ask Questions")
         
-        # Display chat history
+        # Display chat history with MathJax support
         for msg in st.session_state.chat_history:
             with st.chat_message(msg.role):
-                st.write(msg.content)
+                # Add MathJax support for chat messages
+                if msg.role == "assistant":
+                    st.markdown(f"""
+                    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+                    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+                    {msg.content}
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(msg.content)
         
-        # Query input using chat input instead of text input
+        # Query input using chat input
         query = st.chat_input("Enter your question about the document")
         
         if query:
@@ -832,7 +818,7 @@ def main():
                 with st.spinner("Generating answer..."):
                     answer = get_answer(st.session_state["document_search"], query)
                     if answer:
-                        # Add MathJax script with better configuration
+                        # Add MathJax script and CSS (keep your existing styling)
                         mathjax_script = """
                         <script>
                             window.MathJax = {
